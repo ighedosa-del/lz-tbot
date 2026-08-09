@@ -1,2 +1,4 @@
-websockets==12.0
-flask==3.0.3
+flask
+websockets
+websocket-client
+requests
