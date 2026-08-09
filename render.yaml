@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: lz-tbot-web
+    name: lz-tbot-cloud
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
