@@ -3,9 +3,13 @@ services:
     name: lz-tbot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python lz_tbot.py --symbol R_75 --stake 0.35
+    startCommand: python lz_tbot.py
     envVars:
       - key: DERIV_TOKEN
         sync: false
+      - key: SYMBOL
+        value: R_75
+      - key: STAKE
+        value: 0.35
       - key: PYTHONUNBUFFERED
         value: 1
