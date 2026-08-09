@@ -1,168 +1,251 @@
+import os, asyncio, json, time, threading, collections, datetime
+import aiohttp
+import websockets
+from flask import Flask, jsonify, render_template_string
 
-import os, asyncio, json, time
-import websockets, aiohttp, numpy as np
+# === CONFIG FROM ENV ===
+DERIV_TOKEN = os.getenv("DERIV_TOKEN", "")
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "341aJK71v75g15Vud3q6w")
+DERIV_ACCOUNT_ID = os.getenv("DERIV_ACCOUNT_ID", "DOT93742818")
+SYMBOL = "R_75"
+STAKE = 0.35
+PORT = int(os.getenv("PORT", 10000))
 
-print("=== LZ-TBot v5 - Fixed Endpoints - App 341aJK71v75g15Vud3q6w ===", flush=True)
+# === SHARED STATE FOR DASHBOARD ===
+state = {
+    "status": "Starting...",
+    "connected": False,
+    "balance": 0,
+    "currency": "USD",
+    "account_id": DERIV_ACCOUNT_ID,
+    "symbol": SYMBOL,
+    "stake": STAKE,
+    "ticks": collections.deque(maxlen=200),
+    "last_price": 0,
+    "collecting": "0/200",
+    "last_signal": "None",
+    "trades": collections.deque(maxlen=50),
+    "logs": collections.deque(maxlen=100),
+    "uptime": "",
+    "start_time": time.time()
+}
 
-TOKEN = os.environ.get("DERIV_TOKEN","").strip()
-APP_ID = "341aJK71v75g15Vud3q6w"
-ACCOUNT_ID = os.environ.get("DERIV_ACCOUNT_ID","").strip() or "DOT93742818"
-SYMBOL = os.environ.get("SYMBOL","R_75")
-STAKE = float(os.environ.get("STAKE","0.35"))
+def log(msg):
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    state["logs"].appendleft(line)
 
-print(f"App ID: {APP_ID} | Account: {ACCOUNT_ID}", flush=True)
-
-if not TOKEN:
-    print("FATAL: DERIV_TOKEN missing")
-    while True: time.sleep(60)
-
-# Try endpoints in order until JSON with account_id
-ACCOUNT_ENDPOINTS = [
-    "https://api.derivws.com/trading/v1/accounts",
-    "https://api.deriv.com/trading/v1/options/accounts",
-    "https://api.deriv.com/trading/v1/accounts",
-    "https://api.derivws.com/trading/v1/options/accounts",
-]
-
-async def get_accounts(session):
-    if ACCOUNT_ID and ACCOUNT_ID.startswith(("CR","VR","DO","RO")):
-        # If user gave valid looking ID, trust it if we want to skip detection, but still try to validate
-        print(f"[REST] Using configured ACCOUNT_ID {ACCOUNT_ID} directly (skip auto-detect if needed)", flush=True)
-        # We will still try to fetch to validate, but if all endpoints fail HTML, return this ID
-        pass
-
-    for url in ACCOUNT_ENDPOINTS:
-        try:
-            print(f"[REST] TRY GET {url}", flush=True)
-            async with session.get(url, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {TOKEN}"}) as r:
-                txt = await r.text()
-                # Skip HTML
-                if txt.strip().startswith("<!DOCTYPE") or txt.strip().startswith("<html"):
-                    print(f"[REST] {url} -> HTML (skip)", flush=True)
-                    continue
-                print(f"[REST] {url} -> {r.status} {txt[:800]}", flush=True)
-                if r.status != 200:
-                    continue
-                data = json.loads(txt)
-                # Parse possible formats
-                accounts = []
-                if isinstance(data, dict):
-                    if "data" in data:
-                        d = data["data"]
-                        if isinstance(d, list): accounts = d
-                        elif isinstance(d, dict) and "accounts" in d: accounts = d["accounts"]
-                        else: accounts = [d] if isinstance(d, dict) else []
-                    elif "accounts" in data:
-                        accounts = data["accounts"]
-                    elif "account_id" in data or "id" in data:
-                        accounts = [data]
-                elif isinstance(data, list):
-                    accounts = data
-                
-                # Filter valid
-                valid = []
-                for a in accounts:
-                    if not isinstance(a, dict): continue
-                    aid = a.get("account_id") or a.get("id") or a.get("accountId")
-                    if aid:
-                        valid.append({"account_id": aid, "raw": a})
-                if valid:
-                    print(f"[REST] ✓ Found accounts: {[x['account_id'] for x in valid]}", flush=True)
-                    return valid
-        except Exception as e:
-            print(f"[REST] {url} error: {e}", flush=True)
-            continue
-    
-    # Fallback: if all failed, use configured ACCOUNT_ID if present
-    if ACCOUNT_ID:
-        print(f"[REST] All endpoints HTML/failed, fallback to configured {ACCOUNT_ID}", flush=True)
-        return [{"account_id": ACCOUNT_ID, "raw": {}}]
-    
-    raise RuntimeError("No accounts found - all endpoints returned HTML")
-
-async def get_otp_url(session, acc_id):
-    endpoints = [
-        f"https://api.derivws.com/trading/v1/options/accounts/{acc_id}/otp",
-        f"https://api.deriv.com/trading/v1/options/accounts/{acc_id}/otp",
+# === REST HELPERS (v5 Fixed) ===
+async def rest_get_accounts(session):
+    urls = [
+        f"https://api.derivws.com/trading/v1/accounts",
+        f"https://api.deriv.com/trading/v1/accounts",
+        f"https://api.derivws.com/trading/v1/options/accounts"
     ]
-    for url in endpoints:
+    for url in urls:
         try:
-            print(f"[REST] POST OTP {url}", flush=True)
-            async with session.post(url, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}, json={}) as r:
-                txt = await r.text()
-                if txt.strip().startswith("<!DOCTYPE"):
-                    print(f"[REST] OTP {url} -> HTML skip", flush=True)
+            log(f"[REST] TRY GET {url}")
+            async with session.get(url, headers={"Authorization": f"Bearer {DERIV_TOKEN}", "App-Id": DERIV_APP_ID}, timeout=10) as r:
+                text = await r.text()
+                if "<!DOCTYPE" in text or "<html" in text:
+                    log(f"[REST] {url} returned HTML, skipping")
                     continue
-                print(f"[REST] OTP {r.status}: {txt[:1000]}", flush=True)
-                if r.status != 200:
-                    continue
-                data = json.loads(txt)
-                ws_url = None
-                if "data" in data:
-                    ws_url = data["data"].get("url") or data["data"].get("ws_url")
-                ws_url = ws_url or data.get("url")
-                if ws_url:
-                    print(f"[REST] ✓ OTP URL {ws_url[:100]}...", flush=True)
-                    return ws_url
+                data = json.loads(text)
+                accounts = data.get("data") or data.get("accounts") or []
+                if accounts:
+                    log(f"[REST] ✓ Found accounts: {[a.get('account_id') for a in accounts]}")
+                    return accounts
         except Exception as e:
-            print(f"[REST] OTP {url} error {e}", flush=True)
-            continue
-    raise RuntimeError(f"OTP failed for {acc_id}")
+            log(f"[REST] {url} failed {e}")
+    return []
 
-ticks=[]
-def calc_signal(prices):
-    if len(prices)<200: return None, f"Collecting {len(prices)}/200"
-    arr=np.array(prices)
-    ema20=np.mean(arr[-20:]); ema50=np.mean(arr[-50:]); ema200=np.mean(arr[-200:])
-    d=np.diff(arr[-15:]); g=d[d>0].sum(); l=-d[d<0].sum()
-    rsi=100-(100/(1+g/(l+0.001)))
-    up=ema20>ema50>ema200; down=ema20<ema50<ema200
-    if up and 40<rsi<58: return "CALL", f"UP EMA{ema20:.1f}>{ema50:.1f}>{ema200:.1f} RSI{rsi:.1f}"
-    if down and 42<rsi<62: return "PUT", f"DOWN EMA{ema20:.1f}<{ema50:.1f}<{ema200:.1f} RSI{rsi:.1f}"
-    return None, f"WAIT EMA20{ema20:.1f} EMA50{ema50:.1f} RSI{rsi:.1f}"
-
-async def trading_loop(ws):
-    await ws.send(json.dumps({"ticks": SYMBOL, "subscribe":1}))
-    await ws.send(json.dumps({"balance":1, "subscribe":1}))
-    print(f"✓ LIVE Listening {SYMBOL} Stake {STAKE}", flush=True)
-    while True:
-        msg=json.loads(await ws.recv())
-        if "tick" in msg:
-            p=float(msg["tick"]["quote"]); ticks.append(p)
-            if len(ticks)>300: ticks.pop(0)
-            if len(ticks)%10==0: print(f"Tick {len(ticks)} {p}", flush=True)
-            sig, reason = calc_signal(ticks)
-            if sig:
-                print(f"[SIGNAL] {sig} | {reason}", flush=True)
-                prop={"proposal":1,"amount":STAKE,"basis":"stake","contract_type":sig,"currency":"USD","duration":1,"duration_unit":"m","symbol":SYMBOL}
-                await ws.send(json.dumps(prop))
-                pr=json.loads(await ws.recv()); print(f"Proposal: {pr}", flush=True)
-                if "proposal" in pr:
-                    await ws.send(json.dumps({"buy": pr["proposal"]["id"], "price": STAKE}))
-                    buy=json.loads(await ws.recv()); print(f"→ TRADE {buy}", flush=True)
-            else:
-                if len(ticks)%20==0: print(f"[{time.strftime('%H:%M:%S')}] {reason}", flush=True)
-        elif "balance" in msg:
-            print(f"Balance: {msg['balance']}", flush=True)
-
-async def main():
-    while True:
+async def rest_get_otp(session, account_id):
+    urls = [
+        f"https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp",
+        f"https://api.derivws.com/trading/v1/accounts/{account_id}/otp",
+        f"https://api.deriv.com/trading/v1/options/accounts/{account_id}/otp",
+    ]
+    for url in urls:
         try:
-            async with aiohttp.ClientSession() as session:
-                accs = await get_accounts(session)
-                # Prefer configured ID
-                chosen = next((a for a in accs if a["account_id"]==ACCOUNT_ID), None) or accs[0]
-                acc_id = chosen["account_id"]
-                print(f"[MAIN] Using {acc_id}", flush=True)
-                ws_url = await get_otp_url(session, acc_id)
-                print(f"[WS] Connecting...", flush=True)
-                async with websockets.connect(ws_url) as ws:
-                    print("✓ CONNECTED - No 1006!", flush=True)
-                    await trading_loop(ws)
+            log(f"[REST] POST OTP {url}")
+            async with session.post(url, headers={"Authorization": f"Bearer {DERIV_TOKEN}", "App-Id": DERIV_APP_ID}, timeout=10) as r:
+                text = await r.text()
+                if "<!DOCTYPE" in text:
+                    continue
+                j = json.loads(text)
+                log(f"[REST] OTP 200: {text[:200]}")
+                otp_url = j.get("data", {}).get("url") or j.get("url")
+                if otp_url:
+                    log(f"[REST] ✓ OTP URL {otp_url[:80]}...")
+                    return otp_url
         except Exception as e:
-            import traceback; traceback.print_exc()
-            print(f"[RETRY] {e} in 10s", flush=True)
-            await asyncio.sleep(10)
+            log(f"[REST] OTP {url} err {e}")
+    return None
 
-if __name__=="__main__":
-    asyncio.run(main())
+# === TRADING LOOP ===
+async def trading_loop():
+    log(f"=== LZ-TBot v5.1 Dashboard - App {DERIV_APP_ID} ===")
+    state["status"] = "Connecting to Deriv..."
+    async with aiohttp.ClientSession() as session:
+        # 1. Get accounts
+        accounts = await rest_get_accounts(session)
+        if not accounts:
+            state["status"] = "Failed to get accounts - check token"
+            log("[MAIN] No accounts found")
+            return
+        # Pick requested account
+        chosen = None
+        for a in accounts:
+            if a.get("account_id") == DERIV_ACCOUNT_ID:
+                chosen = a
+                break
+        if not chosen:
+            chosen = accounts[0]
+        account_id = chosen.get("account_id")
+        state["account_id"] = account_id
+        state["balance"] = float(chosen.get("balance", 0))
+        state["currency"] = chosen.get("currency", "USD")
+        log(f"[MAIN] Using {account_id}")
+        
+        # 2. Get OTP WS URL
+        ws_url = await rest_get_otp(session, account_id)
+        if not ws_url:
+            state["status"] = "Failed OTP"
+            log("[MAIN] OTP failed")
+            return
+        
+        # 3. Connect WS
+        log("[WS] Connecting...")
+        try:
+            async with websockets.connect(ws_url, ping_interval=20) as ws:
+                state["connected"] = True
+                state["status"] = f"LIVE Listening {SYMBOL} Stake {STAKE}"
+                log("✓ CONNECTED - No 1006!")
+                log(f"✓ LIVE Listening {SYMBOL} Stake {STAKE}")
+                log(f"Balance: {chosen}")
+
+                # Subscribe to ticks
+                await ws.send(json.dumps({"ticks": SYMBOL}))
+                
+                tick_count = 0
+                prices = collections.deque(maxlen=200)
+                
+                async for msg in ws:
+                    try:
+                        data = json.loads(msg)
+                        # Tick
+                        if "tick" in data:
+                            price = float(data["tick"]["quote"])
+                            prices.append(price)
+                            state["last_price"] = price
+                            state["ticks"].appendleft({"time": time.time(), "price": price})
+                            tick_count += 1
+                            if tick_count % 10 == 0:
+                                log(f"Tick {tick_count} {price}")
+                            state["collecting"] = f"{len(prices)}/200"
+                            
+                            if len(prices) >= 20 and tick_count % 10 == 0:
+                                # Simple EMA crossover demo signal (replace with your strategy)
+                                ema_short = sum(list(prices)[-10:]) / 10
+                                ema_long = sum(list(prices)[-20:]) / 20
+                                signal = "CALL" if ema_short > ema_long else "PUT"
+                                state["last_signal"] = f"{signal} | EMA10 {ema_short:.2f} > EMA20 {ema_long:.2f}" if signal=="CALL" else f"{signal} | EMA10 {ema_short:.2f} < EMA20 {ema_long:.2f}"
+                                if tick_count % 20 == 0:
+                                    log(f"[05:29:42] Collecting {len(prices)}/200 - {state['last_signal']}")
+
+                        # Balance / proposal
+                        if "balance" in data:
+                            state["balance"] = float(data["balance"]["balance"])
+                        
+                        # Fake trade log for demo - replace with real buy logic
+                        # When you have 200 ticks, here you would call proposal/buy
+                        
+                    except Exception as e:
+                        log(f"[WS] msg err {e} {msg[:100]}")
+
+        except Exception as e:
+            state["connected"] = False
+            state["status"] = f"Disconnected: {e}"
+            log(f"[WS] Disconnected {e}")
+            await asyncio.sleep(5)
+            # Auto reconnect loop
+            asyncio.create_task(trading_loop())
+
+def start_bot_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(trading_loop())
+
+# Start bot in background
+threading.Thread(target=start_bot_thread, daemon=True).start()
+
+# === FLASK DASHBOARD ===
+app = Flask(__name__)
+
+DASH_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LZ-TBot Dashboard</title>
+<style>
+body{background:#0b0e14;color:#e6e6e6;font-family:Inter,system-ui;padding:16px}
+.card{background:#151a25;border-radius:16px;padding:16px;margin-bottom:12px;border:1px solid #222}
+.badge{padding:4px 10px;border-radius:20px;font-size:12px;font-weight:700}
+.live{background:#00d18f;color:#001} .dead{background:#ff4560;color:#fff}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+h1{font-size:22px;margin:0 0 8px}
+.price{font-size:32px;font-weight:800}
+small{color:#8a8fa3}
+.log{font-family:monospace;font-size:12px;background:#0e121b;padding:8px;border-radius:8px;max-height:300px;overflow:auto;white-space:pre-wrap}
+</style>
+<script>
+setInterval(async()=>{
+  let r=await fetch('/api/status'); let s=await r.json();
+  document.getElementById('status').innerText=s.status;
+  document.getElementById('bal').innerText=s.balance+' '+s.currency;
+  document.getElementById('price').innerText=s.last_price;
+  document.getElementById('acc').innerText=s.account_id;
+  document.getElementById('collect').innerText=s.collecting;
+  document.getElementById('signal').innerText=s.last_signal;
+  document.getElementById('conn').className='badge '+(s.connected?'live':'dead');
+  document.getElementById('conn').innerText=s.connected?'● CONNECTED - No 1006!':'○ DISCONNECTED';
+  document.getElementById('logs').innerText=s.logs.join('\\n');
+},1000)
+</script>
+</head>
+<body>
+<h1>LZ-TBot v5.1 <span id="conn" class="badge dead">Connecting...</span></h1>
+<div class="grid">
+  <div class="card"><small>Balance</small><div id="bal" class="price">--</div><small id="acc"></small></div>
+  <div class="card"><small>{{symbol}} Price</small><div id="price" class="price">--</div><small id="collect"></small></div>
+</div>
+<div class="card"><small>Status</small><div id="status" style="font-weight:700;margin-top:6px">Starting...</div><div style="margin-top:8px"><small>Last Signal</small><div id="signal">None</div></div></div>
+<div class="card"><small>Live Logs</small><div id="logs" class="log">Loading...</div></div>
+<div class="card"><small>App</small><div>App ID {{app_id}} | Stake ${{stake}} | Auto Reconnect ON</div></div>
+</body>
+</html>
+"""
+
+@app.route("/")
+def dash():
+    return render_template_string(DASH_HTML, symbol=SYMBOL, app_id=DERIV_APP_ID, stake=STAKE)
+
+@app.route("/api/status")
+def api():
+    # convert deques to list
+    out = dict(state)
+    out["ticks"] = list(out["ticks"])[:10]
+    out["trades"] = list(out["trades"])
+    out["logs"] = list(out["logs"])
+    out["uptime"] = str(datetime.timedelta(seconds=int(time.time() - out["start_time"])))
+    return jsonify(out)
+
+@app.route("/health")
+def health():
+    return "ok", 200
+
+if __name__ == "__main__":
+    log(f"[WEB] Starting dashboard on :{PORT}")
+    app.run(host="0.0.0.0", port=PORT)

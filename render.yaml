@@ -1,7 +1,8 @@
 services:
-  - type: worker
+  - type: web
     name: lz-tbot
     env: python
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python lz_tbot.py
     envVars:
@@ -11,9 +12,3 @@ services:
         value: 341aJK71v75g15Vud3q6w
       - key: DERIV_ACCOUNT_ID
         value: DOT93742818
-      - key: SYMBOL
-        value: R_75
-      - key: STAKE
-        value: 0.35
-      - key: PYTHONUNBUFFERED
-        value: 1
