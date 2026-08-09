@@ -10,7 +10,7 @@ services:
       - key: DERIV_APP_ID
         value: 341aJK71v75g15Vud3q6w
       - key: DERIV_ACCOUNT_ID
-        sync: false
+        value: DOT93742818
       - key: SYMBOL
         value: R_75
       - key: STAKE

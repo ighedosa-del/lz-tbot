@@ -1,0 +1,68 @@
+
+// FIXED Deriv Client - Deriv v5 PAT Flow - App ID 341aJK71v75g15Vud3q6w
+const APP_ID = "341aJK71v75g15Vud3q6w";
+
+export class DerivClient {
+  private ws: WebSocket | null = null;
+  private token: string = "";
+  
+  async connect(token: string): Promise<any> {
+    this.token = token;
+    // Step 1: Get accounts via Next.js proxy to avoid CORS
+    console.log("[Deriv] Fetching accounts...");
+    const accRes = await fetch("/api/deriv-auth", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ action: "accounts", token, appId: APP_ID })
+    });
+    const accData = await accRes.json();
+    if (!accRes.ok) throw new Error(accData.error || "Accounts failed");
+    
+    const accounts = accData.data || accData.accounts || accData;
+    const firstAcc = Array.isArray(accounts) ? accounts[0] : accounts;
+    const accountId = firstAcc.account_id || firstAcc.id;
+    console.log("[Deriv] Got account:", accountId, firstAcc);
+    
+    // Step 2: Get OTP URL
+    console.log("[Deriv] Getting OTP for", accountId);
+    const otpRes = await fetch("/api/deriv-auth", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ action: "otp", token, appId: APP_ID, accountId })
+    });
+    const otpData = await otpRes.json();
+    if (!otpRes.ok) throw new Error(otpData.error || "OTP failed");
+    
+    const wsUrl = otpData.data?.url || otpData.url;
+    console.log("[Deriv] Got WS URL:", wsUrl);
+    
+    // Step 3: Connect to pre-authenticated WS
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        console.log("[Deriv] WS Connected - pre-authenticated!");
+        this.ws = ws;
+        // Request balance and ticks to confirm
+        ws.send(JSON.stringify({ balance: 1, subscribe: 1 }));
+        resolve({ account: firstAcc, wsUrl });
+      };
+      ws.onerror = (e) => {
+        console.error("[Deriv] WS Error", e);
+        reject(new Error("WebSocket error"));
+      };
+      ws.onclose = (e) => {
+        console.log("[Deriv] WS Closed", e.code, e.reason);
+        if (e.code === 1006) reject(new Error("1006 - OTP expired, retry"));
+      };
+    });
+  }
+  
+  subscribeTicks(symbol: string, cb: (tick: any)=>void) {
+    if (!this.ws) return;
+    this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
+    this.ws.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+      cb(data);
+    };
+  }
+}

@@ -1,0 +1,42 @@
+
+import { NextRequest, NextResponse } from "next/server";
+
+const APP_ID_DEFAULT = "341aJK71v75g15Vud3q6w";
+
+export async function POST(req: NextRequest) {
+  const { action, token, appId, accountId } = await req.json();
+  const appIdToUse = appId || APP_ID_DEFAULT;
+  
+  try {
+    if (action === "accounts") {
+      const res = await fetch("https://api.deriv.com/trading/v1/accounts", {
+        headers: { "Deriv-App-ID": appIdToUse, "Authorization": `Bearer ${token}` }
+      });
+      const text = await res.text();
+      console.log("[API] Accounts", res.status, text);
+      if (!res.ok) return NextResponse.json({ error: text }, { status: res.status });
+      const data = JSON.parse(text);
+      return NextResponse.json(data);
+    }
+    
+    if (action === "otp") {
+      if (!accountId) return NextResponse.json({ error: "accountId required" }, { status: 400 });
+      const url = `https://api.derivws.com/trading/v1/options/accounts/${accountId}/otp`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Deriv-App-ID": appIdToUse, "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      const text = await res.text();
+      console.log("[API] OTP", res.status, text);
+      if (!res.ok) return NextResponse.json({ error: text }, { status: res.status });
+      const data = JSON.parse(text);
+      return NextResponse.json(data);
+    }
+    
+    return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  } catch (e:any) {
+    console.error("[API] Error", e);
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
