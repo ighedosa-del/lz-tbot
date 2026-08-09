@@ -1,137 +1,94 @@
-import os, sys, json, time, threading, requests, traceback
+import os, sys, json, time, threading, requests, websocket
 from flask import Flask
-import websocket
 
-print("=== LZ TBOT v9 FIX - PAT + CORRECT ENDPOINT ===")
+print("=== LZ TBOT v11 FINAL - CORRECT HOST api.derivws.com ===")
+PAT = (os.getenv("DERIV_PAT") or os.getenv("DERIV_TOKEN") or "").strip()
+APP_ID = (os.getenv("DERIV_APP_IDS","").split(",")[0].strip() or os.getenv("DERIV_APP_ID","").strip() or "341aJK71v75g15Vud3q6w")
+print(f"PAT {PAT[:8]}... len={len(PAT)} APP_ID={APP_ID}")
 
-# --- ENV ---
-PAT = os.getenv("DERIV_PAT") or os.getenv("DERIV_TOKEN") or ""
-APP_IDS = [s.strip() for s in os.getenv("DERIV_APP_IDS","").split(",") if s.strip()]
-if not APP_IDS:
-    APP_IDS = [os.getenv("DERIV_APP_ID","").strip()]
-
-if not PAT:
-    print("[FATAL] No DERIV_PAT set in Render env!")
-    sys.exit(1)
-if not APP_IDS or not APP_IDS[0]:
-    print("[FATAL] No APP_ID set!")
-    sys.exit(1)
-
-print(f"PAT: {PAT[:6]}...{PAT[-4:]} len={len(PAT)}")
-print(f"APP_IDS: {APP_IDS}")
-
-# Keep Render alive
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot v9 Running - PAT Fixed Endpoint"
+def home(): return "Bot v11 api.derivws.com - Live"
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.getenv("PORT",10000)))
 threading.Thread(target=run_flask, daemon=True).start()
 
-# Correct REST endpoints to try (Deriv PAT API)
-ENDPOINTS = [
-    "https://api.deriv.com/trading/v1/options/accounts",
-    "https://api.deriv.com/api/trading/v1/options/accounts",
-    "https://api.deriv.com/trading/v1/accounts",
-]
-
-HEADERS_BASE = {
+BASE = "https://api.derivws.com/trading/v1/options"
+HEADERS = {
     "Authorization": f"Bearer {PAT}",
+    "x-deriv-app-id": APP_ID,
+    "App-Id": APP_ID,
     "Accept": "application/json",
-    "User-Agent": "LZ-TBOT/9.0",
+    "Content-Type": "application/json"
 }
 
-def try_rest():
-    for base_url in ENDPOINTS:
-        for app_id in APP_IDS:
-            url = base_url
-            # Some endpoints need app_id as query
-            headers = {**HEADERS_BASE, "App-Id": app_id, "X-App-Id": app_id}
-            params = {"app_id": app_id}
-            try:
-                print(f"[TRY] GET {url} AppID={app_id}")
-                r = requests.get(url, headers=headers, params=params, timeout=15)
-                print(f"[REST] {r.status_code} {r.text[:200]}")
-                if r.status_code==200 and r.text.strip().startswith("{"):
-                    data = r.json()
-                    print(f"[REST OK] {json.dumps(data)[:500]}")
-                    # Find DOT account
-                    accounts = data.get("data") or data.get("accounts") or []
-                    if accounts:
-                        for acc in accounts:
-                            if "DOT" in str(acc).upper() or "derived" in str(acc).lower():
-                                print(f"[FOUND DOT] {acc}")
-                                return acc
-                        return accounts[0]
-                    # Also handle OTP url flow
-                    if "authenticated_url" in str(data).lower():
-                        return data
-                elif "<!DOCTYPE" in r.text:
-                    print("[ERR] Got HTML not JSON - endpoint is website fallback, trying next...")
-                    continue
-            except Exception as e:
-                print(f"[REST ERR] {e}")
-                traceback.print_exc()
-    return None
-
-def ws_trading(authenticated_ws_url=None):
-    # Fallback to websocket trading if we got OTP url
-    # Deriv PAT flow: REST returns trading websocket URL with OTP
-    # Use that URL to connect
-    if not authenticated_ws_url:
-        print("[WS] No OTP url, trying direct WS with PAT")
-        # Try direct WS authorize
-        ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_IDS[0]}"
+def rest_accounts():
+    url = f"{BASE}/accounts"
+    print(f"[TRY] GET {url} with Bearer PAT + x-deriv-app-id={APP_ID}")
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    print(f"[REST] {r.status_code} {r.text[:1000]}")
+    if r.status_code==200:
         try:
-            ws = websocket.create_connection(ws_url, timeout=10)
-            ws.send(json.dumps({"authorize": PAT}))
-            resp = json.loads(ws.recv())
-            print(f"[WS AUTH] {resp}")
-            if "error" in resp:
-                print(f"[WS AUTH FAIL] {resp['error']}")
-                return False
-            print("[WS] Authorized OK - bot would trade here")
-            # Keep alive loop
-            while True:
-                time.sleep(30)
-                ws.send(json.dumps({"ping":1}))
-                print("[WS] ping", ws.recv())
-        except Exception as e:
-            print(f"[WS ERR] {e}")
-            traceback.print_exc()
-            return False
+            j = r.json()
+            print(f"[REST OK] {json.dumps(j)[:2000]}")
+            return j
+        except:
+            print("[REST] Not JSON, but status 200")
+            return None
     else:
-        print(f"[WS] Connecting to OTP URL: {authenticated_ws_url[:80]}...")
-        try:
-            ws = websocket.create_connection(authenticated_ws_url, timeout=15)
-            print("[WS] Connected to trading WS!")
-            while True:
-                time.sleep(30)
-                ws.send(json.dumps({"ping":1}))
-                print(ws.recv())
-        except Exception as e:
-            print(f"[WS OTP ERR] {e}")
-            return False
+        print(f"[REST FAIL] {r.status_code} {r.text[:500]}")
+        if r.status_code==401:
+            print("[HINT] PAT expired! Regenerate new PAT in Deriv account -> API tokens")
+        return None
 
-# MAIN LOOP
+def run():
+    data = rest_accounts()
+    if not data:
+        print("[ERR] accounts failed, retry 10s")
+        time.sleep(10)
+        return
+    # data contains accounts and maybe trading urls
+    # Try to find DOT account
+    accounts = data.get("data") or data.get("accounts") or []
+    dot = None
+    for acc in accounts:
+        print(f"[ACCOUNT] {acc}")
+        if "DOT" in str(acc).upper() or "derived" in str(acc).lower():
+            dot = acc
+    if not dot and accounts:
+        dot = accounts[0]
+    print(f"[SELECTED] {dot}")
+    # If trading URL present, connect WS
+    auth_url = None
+    if isinstance(dot, dict):
+        auth_url = dot.get("authenticated_url") or dot.get("login_url") or dot.get("url")
+    if auth_url:
+        print(f"[WS OTP] Connecting {auth_url[:120]}...")
+        ws = websocket.create_connection(auth_url, timeout=15)
+        print("[WS] OTP Connected!")
+        while True:
+            msg = ws.recv()
+            print(f"[WS MSG] {msg[:500]}")
+    else:
+        # No OTP URL, use direct WS authorize as fallback (works for many PATs)
+        print("[WS] No OTP URL, trying direct WS authorize")
+        ws = websocket.create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}", timeout=15)
+        ws.send(json.dumps({"authorize": PAT}))
+        resp = json.loads(ws.recv())
+        print(f"[WS AUTH] {resp}")
+        if "error" in resp:
+            print(f"[WS AUTH ERR] {resp['error']['message']}")
+            time.sleep(5)
+            return
+        print("[WS LIVE] Bot authorized! Subscribing balance...")
+        ws.send(json.dumps({"balance":1,"subscribe":1}))
+        while True:
+            print(ws.recv())
+
 while True:
     try:
-        acc = try_rest()
-        if acc:
-            print(f"[MAIN] Got account data: {acc}")
-            # Extract OTP url if present
-            otp_url = None
-            if isinstance(acc, dict):
-                otp_url = acc.get("authenticated_url") or acc.get("trading_url") or acc.get("url")
-                if not otp_url:
-                    # nested
-                    for v in acc.values():
-                        if isinstance(v,str) and "wss://" in v:
-                            otp_url=v
-            ws_trading(otp_url)
-        else:
-            print("[ERR] All REST endpoints failed - retry in 10s")
-            time.sleep(10)
+        run()
     except Exception as e:
-        print(f"[LOOP ERR] {e}")
+        import traceback; traceback.print_exc()
+        print(f"[LOOP ERR] {e} retry 5s")
         time.sleep(5)
