@@ -1,14 +1,7 @@
 services:
   - type: web
-    name: lz-tbot
+    name: lz-tbot-web
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python lz_tbot.py
-    envVars:
-      - key: DERIV_TOKEN
-        sync: false
-      - key: DERIV_APP_ID
-        value: 341aJK71v75g15Vud3q6w
-      - key: DERIV_ACCOUNT_ID
-        value: DOT93742818
