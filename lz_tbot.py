@@ -5,7 +5,7 @@ from flask import Flask, jsonify, render_template_string
 DERIV_TOKEN = os.getenv("DERIV_TOKEN", "").strip()
 DERIV_APP_ID_RAW = os.getenv("DERIV_APP_ID", "1089").strip()
 # FIX: 401 means app_id blocked - fallback to public 1089
-APP_IDS_TO_TRY = [DERIV_APP_ID_RAW, "1089", "36951", "1"]
+APP_IDS_TO_TRY = [DERIV_APP_ID_RAW]
 DEFAULT_ACCOUNT = os.getenv("DERIV_ACCOUNT_ID", "DOT93742818").strip()
 SYMBOL = "R_75"
 PORT = int(os.getenv("PORT", 10000))
