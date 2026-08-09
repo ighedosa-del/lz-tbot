@@ -7,6 +7,10 @@ services:
     envVars:
       - key: DERIV_TOKEN
         sync: false
+      - key: DERIV_APP_ID
+        value: 341aJK71v75g15Vud3q6w
+      - key: DERIV_ACCOUNT_ID
+        sync: false
       - key: SYMBOL
         value: R_75
       - key: STAKE
